@@ -19,12 +19,16 @@ CACHE_DIR = "cache"
 # Configure OSMnx caching
 def setup_cache(enabled=True):
     """Configure OSMnx to cache downloaded map data."""
+    # Use absolute path relative to script location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_path = os.path.join(script_dir, CACHE_DIR)
+
     if enabled:
-        if not os.path.exists(CACHE_DIR):
-            os.makedirs(CACHE_DIR)
+        if not os.path.exists(cache_path):
+            os.makedirs(cache_path)
         ox.settings.use_cache = True
-        ox.settings.cache_folder = CACHE_DIR
-        print(f"✓ Cache enabled: {CACHE_DIR}/")
+        ox.settings.cache_folder = cache_path
+        print(f"✓ Cache enabled: {cache_path}/")
     else:
         ox.settings.use_cache = False
         print("✓ Cache disabled")

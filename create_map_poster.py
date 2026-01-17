@@ -14,6 +14,20 @@ import argparse
 THEMES_DIR = "themes"
 FONTS_DIR = "fonts"
 POSTERS_DIR = "posters"
+CACHE_DIR = "cache"
+
+# Configure OSMnx caching
+def setup_cache(enabled=True):
+    """Configure OSMnx to cache downloaded map data."""
+    if enabled:
+        if not os.path.exists(CACHE_DIR):
+            os.makedirs(CACHE_DIR)
+        ox.settings.use_cache = True
+        ox.settings.cache_folder = CACHE_DIR
+        print(f"✓ Cache enabled: {CACHE_DIR}/")
+    else:
+        ox.settings.use_cache = False
+        print("✓ Cache disabled")
 
 def load_fonts():
     """
@@ -423,6 +437,7 @@ Examples:
     parser.add_argument('--list-themes', action='store_true', help='List all available themes')
     parser.add_argument('--lat', type=float, help='Latitude (bypass geocoding)')
     parser.add_argument('--lon', type=float, help='Longitude (bypass geocoding)')
+    parser.add_argument('--no-cache', action='store_true', help='Disable caching of downloaded map data')
     
     args = parser.parse_args()
     
@@ -452,7 +467,10 @@ Examples:
     print("=" * 50)
     print("City Map Poster Generator")
     print("=" * 50)
-    
+
+    # Setup caching
+    setup_cache(enabled=not args.no_cache)
+
     # Load theme
     THEME = load_theme(args.theme)
     

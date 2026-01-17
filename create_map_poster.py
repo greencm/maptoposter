@@ -421,6 +421,8 @@ Examples:
     parser.add_argument('--theme', '-t', type=str, default='feature_based', help='Theme name (default: feature_based)')
     parser.add_argument('--distance', '-d', type=int, default=29000, help='Map radius in meters (default: 29000)')
     parser.add_argument('--list-themes', action='store_true', help='List all available themes')
+    parser.add_argument('--lat', type=float, help='Latitude (bypass geocoding)')
+    parser.add_argument('--lon', type=float, help='Longitude (bypass geocoding)')
     
     args = parser.parse_args()
     
@@ -456,7 +458,11 @@ Examples:
     
     # Get coordinates and generate poster
     try:
-        coords = get_coordinates(args.city, args.country)
+        if args.lat is not None and args.lon is not None:
+            coords = (args.lat, args.lon)
+            print(f"✓ Using provided coordinates: {args.lat}, {args.lon}")
+        else:
+            coords = get_coordinates(args.city, args.country)
         output_file = generate_output_filename(args.city, args.theme)
         create_poster(args.city, args.country, coords, args.distance, output_file)
         

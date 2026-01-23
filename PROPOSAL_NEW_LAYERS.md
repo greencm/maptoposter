@@ -13,108 +13,155 @@ Each layer follows the existing architecture pattern: **fetch data → create Ge
 
 ## 1. Income Level Layer
 
-### Data Source Options
+### Data Source: FFIEC Tract Income + TIGER/Line Boundaries (No API Key)
 
-| Source | Coverage | API | Format | Cost |
-|--------|----------|-----|--------|------|
-| **US Census Bureau** | USA only | Free API | GeoJSON | Free |
-| **OpenStreetMap Admin Boundaries** | Global | OSMnx | Polygons | Free |
-| **World Bank Data** | Global (country-level) | REST API | JSON | Free |
-| **Eurostat** | Europe | REST API | GeoJSON | Free |
+| Source | What It Provides | Format | Size |
+|--------|-----------------|--------|------|
+| **FFIEC Census Tract List** | Income classification per tract (low/moderate/middle/upper) | CSV/XLSX | ~5 MB |
+| **Census TIGER/Line** | Tract boundary geometries | Shapefile | ~50 MB/state |
 
-### Recommended Approach: US Census Bureau API
-
-**Why:** Provides census tract-level income data with precise boundaries, ideal for city-scale maps.
+**Why this approach:**
+- No API key required — both are public bulk downloads from federal agencies
+- FFIEC already classifies tracts into income levels (no quintile math needed)
+- TIGER/Line shapefiles are the authoritative source for census geometry
+- Files are downloaded once on first use, then cached locally
 
 ### Implementation
 
-#### Step 1: Add Census Data Fetcher
+#### Step 1: Data Download Script
 
 ```python
+import os
 import requests
+import zipfile
 
-def fetch_income_data(lat, lon, dist):
+INCOME_DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "income")
+
+FFIEC_TRACT_URL = "https://www.ffiec.gov/census/csv/census2024.csv"
+TIGER_BASE_URL = "https://www2.census.gov/geo/tiger/TIGER2023/TRACT"
+
+def download_income_data(state_fips=None):
     """
-    Fetch median household income by census tract from US Census Bureau.
-    Returns GeoDataFrame with income classifications.
+    Download FFIEC tract income classifications and TIGER/Line boundaries.
+    Called once on first use — no API key needed.
     """
-    # Get census tracts that intersect our bounding box
-    bbox = ox.utils_geo.bbox_from_point((lat, lon), dist=dist)
+    os.makedirs(INCOME_DATA_DIR, exist_ok=True)
 
-    # Census TIGERweb API for tract boundaries
-    tiger_url = "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_Census2020/MapServer/8/query"
-    params = {
-        "geometry": f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}",
-        "geometryType": "esriGeometryEnvelope",
-        "spatialRel": "esriSpatialRelIntersects",
-        "outFields": "GEOID,NAME",
-        "returnGeometry": "true",
-        "f": "geojson"
-    }
+    # 1. Download FFIEC income classifications (single national file)
+    ffiec_path = os.path.join(INCOME_DATA_DIR, "ffiec_tracts.csv")
+    if not os.path.exists(ffiec_path):
+        print("Downloading FFIEC tract income data...")
+        resp = requests.get(FFIEC_TRACT_URL)
+        with open(ffiec_path, 'wb') as f:
+            f.write(resp.content)
 
-    response = requests.get(tiger_url, params=params)
-    tracts_gdf = gpd.GeoDataFrame.from_features(response.json()["features"])
+    # 2. Download TIGER/Line tract boundaries (per-state shapefiles)
+    if state_fips:
+        tiger_path = os.path.join(INCOME_DATA_DIR, f"tl_2023_{state_fips}_tract.shp")
+        if not os.path.exists(tiger_path):
+            zip_name = f"tl_2023_{state_fips}_tract.zip"
+            url = f"{TIGER_BASE_URL}/{zip_name}"
+            print(f"Downloading TIGER/Line tracts for state {state_fips}...")
+            resp = requests.get(url)
+            zip_path = os.path.join(INCOME_DATA_DIR, zip_name)
+            with open(zip_path, 'wb') as f:
+                f.write(resp.content)
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                z.extractall(INCOME_DATA_DIR)
+            os.remove(zip_path)
 
-    # Fetch income data from Census API (requires API key)
-    census_url = "https://api.census.gov/data/2022/acs/acs5"
-    # B19013_001E = Median household income
-    income_params = {
-        "get": "NAME,B19013_001E",
-        "for": "tract:*",
-        "in": f"state:*&county:*",
-        "key": CENSUS_API_KEY
-    }
-
-    # Join income data to tract boundaries
-    # Classify into quintiles for choropleth rendering
-    return classify_income_levels(tracts_gdf, income_data)
-
-def classify_income_levels(gdf, income_data):
-    """Classify income into 5 levels for visualization."""
-    gdf['income_level'] = pd.qcut(gdf['median_income'], q=5, labels=[1, 2, 3, 4, 5])
-    return gdf
+def get_state_fips_for_point(lat, lon):
+    """Determine which state FIPS code(s) cover the map area."""
+    # Use reverse geocoding (already available via geopy)
+    from geopy.geocoders import Nominatim
+    geolocator = Nominatim(user_agent="maptoposter")
+    location = geolocator.reverse(f"{lat}, {lon}")
+    # Map state name to FIPS code from bundled lookup table
+    return STATE_FIPS_LOOKUP.get(location.raw['address'].get('state'))
 ```
 
-#### Step 2: Add Theme Properties
+#### Step 2: Load and Clip Income Data
 
-Add to each theme JSON file in `/themes/`:
+```python
+def load_income_data(lat, lon, dist):
+    """
+    Load pre-downloaded FFIEC income data joined with TIGER boundaries.
+    No API key needed — uses cached static files.
+    """
+    state_fips = get_state_fips_for_point(lat, lon)
+    download_income_data(state_fips=state_fips)
+
+    # Load TIGER tract boundaries
+    tiger_path = os.path.join(INCOME_DATA_DIR, f"tl_2023_{state_fips}_tract.shp")
+    tracts = gpd.read_file(tiger_path)
+
+    # Load FFIEC income classifications
+    ffiec = pd.read_csv(os.path.join(INCOME_DATA_DIR, "ffiec_tracts.csv"))
+    # FFIEC provides: Tract Income Level (Low / Moderate / Middle / Upper)
+    ffiec['GEOID'] = ffiec['MSA/MD'].astype(str) + ffiec['State Code'].astype(str).str.zfill(2) + \
+                     ffiec['County Code'].astype(str).str.zfill(3) + ffiec['Tract'].astype(str)
+
+    # Join income level to geometry
+    merged = tracts.merge(ffiec[['GEOID', 'Tract Income Level']], on='GEOID', how='left')
+
+    # Map FFIEC categories to numeric levels
+    income_map = {'Low': 1, 'Moderate': 2, 'Middle': 3, 'Upper': 4}
+    merged['income_level'] = merged['Tract Income Level'].map(income_map)
+
+    # Clip to map bounding box
+    bbox = ox.utils_geo.bbox_from_point((lat, lon), dist=dist)
+    from shapely.geometry import box
+    clip_box = box(bbox[1], bbox[0], bbox[3], bbox[2])
+    return merged[merged.intersects(clip_box)]
+```
+
+#### Step 3: Add Theme Properties
+
+Add to each theme JSON file in `/themes/` (4 levels matching FFIEC categories):
 
 ```json
 {
-  "income_level_1": "#2C1810",
-  "income_level_2": "#5D4037",
-  "income_level_3": "#8D6E63",
-  "income_level_4": "#BCAAA4",
-  "income_level_5": "#EFEBE9",
+  "income_low": "#2C1810",
+  "income_moderate": "#5D4037",
+  "income_middle": "#8D6E63",
+  "income_upper": "#EFEBE9",
   "income_opacity": 0.4
 }
 ```
 
-#### Step 3: Render Layer
+#### Step 4: Render Layer
 
 ```python
+# FFIEC income level to theme key mapping
+INCOME_LEVEL_COLORS = {
+    1: 'income_low',
+    2: 'income_moderate',
+    3: 'income_middle',
+    4: 'income_upper'
+}
+
 # In create_poster(), after parks rendering:
 if income_data is not None and not income_data.empty and show_income:
-    for level in range(1, 6):
+    for level, theme_key in INCOME_LEVEL_COLORS.items():
         level_data = income_data[income_data['income_level'] == level]
         if not level_data.empty:
             level_data.plot(
                 ax=ax,
-                color=THEME[f'income_level_{level}'],
+                color=THEME.get(theme_key, '#888888'),
                 alpha=THEME.get('income_opacity', 0.4),
                 linewidth=0,
                 zorder=0.5  # Below roads, above background
             )
 ```
 
-#### CLI Integration
+#### Step 5: CLI Integration
 
 ```python
 parser.add_argument('--show-income', action='store_true',
-                    help='Overlay income level choropleth (US only)')
-parser.add_argument('--census-api-key', type=str,
-                    help='US Census Bureau API key')
+                    help='Overlay income level choropleth (US only, downloads data on first use)')
 ```
+
+No API key argument needed — data is fetched from public bulk download URLs.
 
 ---
 
@@ -397,9 +444,11 @@ maptoposter/
 ├── create_map_poster.py       # Main application (updated)
 ├── data_fetchers/             # NEW: Modular data fetching
 │   ├── __init__.py
-│   ├── census.py              # Income data from Census Bureau
+│   ├── income.py              # FFIEC + TIGER income data (downloads on first use)
 │   ├── pollution.py           # Air quality from OpenWeather
 │   └── superfund.py           # EPA Superfund sites
+├── data/                      # NEW: Cached downloaded data (gitignored)
+│   └── income/                # FFIEC CSV + TIGER shapefiles
 ├── themes/                    # Updated with new color properties
 ├── fonts/
 ├── posters/
@@ -417,7 +466,6 @@ python create_map_poster.py \
     --show-income \
     --show-pollution \
     --show-superfund \
-    --census-api-key "YOUR_KEY" \
     --openweather-api-key "YOUR_KEY" \
     --superfund-buffer 500
 ```
@@ -426,12 +474,11 @@ python create_map_poster.py \
 
 ## Configuration File Support
 
-Add support for a `.maptoposter.json` config file to store API keys:
+Add support for a `.maptoposter.json` config file to store settings:
 
 ```json
 {
   "api_keys": {
-    "census": "your-census-api-key",
     "openweather": "your-openweather-api-key"
   },
   "defaults": {
@@ -466,11 +513,10 @@ New theme file: `themes/environmental.json`
   "road_tertiary": "#1A1A1A",
   "road_residential": "#151515",
   "road_default": "#2A2A2A",
-  "income_level_1": "#081C15",
-  "income_level_2": "#1B4332",
-  "income_level_3": "#40916C",
-  "income_level_4": "#74C69D",
-  "income_level_5": "#B7E4C7",
+  "income_low": "#081C15",
+  "income_moderate": "#1B4332",
+  "income_middle": "#40916C",
+  "income_upper": "#B7E4C7",
   "income_opacity": 0.35,
   "pollution_good": "#06D6A0",
   "pollution_moderate": "#FFD166",
@@ -506,7 +552,7 @@ requests>=2.31.0     # For API calls (likely already available)
 |-------|-------|--------|-------|
 | 1 | Superfund Sites | Low | High (point data, simple fetch) |
 | 2 | Pollution Levels | Medium | High (requires interpolation) |
-| 3 | Income Levels | Medium | Medium (requires Census API key) |
+| 3 | Income Levels | Medium | Medium (downloads FFIEC + TIGER data on first use) |
 
 ### Recommended Order
 1. **Superfund Sites** - Simplest to implement, clear visual impact
@@ -518,7 +564,7 @@ requests>=2.31.0     # For API calls (likely already available)
 ## Limitations & Considerations
 
 ### Data Coverage
-- **Income data**: US Census only covers USA; international requires different sources
+- **Income data**: FFIEC/TIGER covers USA only; international would require different sources
 - **Superfund sites**: USA only (EPA jurisdiction)
 - **Pollution data**: Global via OpenWeather, but resolution varies
 
@@ -533,7 +579,7 @@ requests>=2.31.0     # For API calls (likely already available)
 - Opacity tuning is critical for layer stacking
 
 ### API Rate Limits
-- Census API: 500 requests/day (free key)
+- FFIEC/TIGER downloads: No rate limits (static file hosting)
 - OpenWeather: 60 requests/minute (free tier)
 - EPA APIs: Generally unrestricted
 
@@ -543,7 +589,7 @@ requests>=2.31.0     # For API calls (likely already available)
 
 This proposal outlines a modular approach to adding income, pollution, and Superfund site data to maptoposter. The architecture follows existing patterns:
 
-1. **Fetch** → External APIs (Census, OpenWeather, EPA)
+1. **Fetch** → Static downloads (FFIEC, TIGER) and APIs (OpenWeather, EPA)
 2. **Transform** → GeoDataFrames with classification
 3. **Render** → Theme-aware plotting with z-order stacking
 4. **Configure** → CLI flags and theme JSON properties
